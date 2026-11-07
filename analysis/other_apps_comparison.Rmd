@@ -1,0 +1,104 @@
+---
+title: "Other Apps Comparison"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This script relates the ARF and CALF scores to the other academic measures (AlPaCa, PA, SWR and SRE). It saves:
+
+1. The correlation of each arithmetic task with each academic measure, partialing out grade (Table 3; Table S9.6).
+2. The Fisher's z-tests comparing the FR and FC correlations of each task with each academic measure.
+
+# Load libraries
+
+```{r}
+library(tidyverse)
+library(here)
+```
+
+# Paths and settings
+
+```{r}
+# "cleaned" for the fully cleaned scores, "no_cleaning" for the uncleaned scores
+version <- "cleaned"
+
+scores_dir <- here("data", "scores")
+
+# Each version: its scores file, where its results go, and the correlation table name
+versions <- list(
+  cleaned     = list(scores_file = "scores_all_apps_rt-3-75_5-875-7917_math.csv",
+                     results_dir = here("results"),
+                     corr_file = "table3_correlations_other_measures.csv"),
+  no_cleaning = list(scores_file = "scores_all_apps_no_cleaning.csv",
+                     results_dir = here("results", "no_cleaning"),
+                     corr_file = "sup9_table6_correlations_other_measures.csv")
+)
+
+results_dir <- versions[[version]]$results_dir
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+
+scores_all <- read.csv(file.path(scores_dir, versions[[version]]$scores_file)) %>%
+  mutate(grade_as_int = as.integer(case_when(user_grade_at_run == "Kindergarten" ~ "0",
+                                             .default = user_grade_at_run)))
+```
+
+# Correlations with the academic measures
+
+```{r}
+math_tasks <- c(arf_fr = "arf_prod", arf_fc = "arf_2afc", calf_fr = "calf_prod", calf_fc = "calf_6afc")
+other_measures <- c(AlPaCa = "alpaca_score", PA = "pa_score", SWR = "swr_score", SRE = "sre_score")
+
+partial_cor_n <- function(x, y) {
+  sub <- scores_all[complete.cases(scores_all[, c(x, y, "grade_as_int")]), ]
+  tibble(r = cor(resid(lm(sub[[x]] ~ sub$grade_as_int)), resid(lm(sub[[y]] ~ sub$grade_as_int))),
+         n = nrow(sub))
+}
+
+corr_others <- expand_grid(measure = names(other_measures), task = names(math_tasks)) %>%
+  mutate(stats = map2(measure, task, ~ partial_cor_n(math_tasks[[.y]], other_measures[[.x]]))) %>%
+  unnest(stats)
+```
+
+# Table 3: Correlations with the academic measures
+
+```{r}
+table3 <- corr_others %>%
+  mutate(r = sub("^0", "", sprintf("%.2f", r))) %>%
+  dplyr::select(measure, task, r) %>%
+  pivot_wider(names_from = task, values_from = r) %>%
+  add_row(measure = "Math", .before = 1) %>%
+  add_row(measure = "Reading", .before = 3) %>%
+  mutate(across(everything(), ~ replace_na(.x, "")))
+
+table3
+
+write.csv(table3, file.path(results_dir, versions[[version]]$corr_file), row.names = FALSE)
+```
+
+# Fisher's z-tests: FR vs FC correlations
+
+```{r}
+fisher_z_test <- function(r1, n1, r2, n2) {
+  z <- (atanh(r1) - atanh(r2)) / sqrt(1 / (n1 - 3) + 1 / (n2 - 3))
+  tibble(z = round(z, 3), p = round(2 * (1 - pnorm(abs(z))), 4))
+}
+
+fisher_tests <- corr_others %>%
+  separate(task, into = c("task", "modality")) %>%
+  pivot_wider(names_from = modality, values_from = c(r, n)) %>%
+  mutate(test = pmap(list(r_fr, n_fr, r_fc, n_fc), fisher_z_test)) %>%
+  unnest(test) %>%
+  mutate(task = recode(task, arf = "ARF", calf = "CalF"),
+         across(c(r_fr, r_fc), ~ round(.x, 3))) %>%
+  dplyr::select(task, measure, r_fr, n_fr, r_fc, n_fc, z, p) %>%
+  arrange(task)
+
+fisher_tests
+
+cat(sprintf("Two-tailed Fisher's zs < %.2f, ps > %.2f\n", ceiling(max(abs(fisher_tests$z)) * 100) / 100, floor(min(fisher_tests$p) * 100) / 100))
+
+write.csv(fisher_tests, file.path(results_dir, "fisher_z_other_measures.csv"), row.names = FALSE)
+```

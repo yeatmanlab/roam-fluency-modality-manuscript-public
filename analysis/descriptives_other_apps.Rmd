@@ -1,0 +1,202 @@
+---
+title: "Other Apps Descriptives"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This script computes the descriptive statistics of the AlPaCa and the reading measures for Supplements 8 and 3, respectively. It saves:
+
+1. The AlPaCa descriptives by grade bin, with the mean item reached (Table S3).
+2. The AlPaCa score distribution (Figure S3).
+3. The reading measure descriptives (Table S8).
+4. The reading measure score distributions (Figure S8).
+
+# Load libraries
+
+```{r}
+library(tidyverse)
+library(here)
+library(gridExtra)
+library(grid)
+```
+
+# Paths
+
+```{r}
+scores_dir <- here("data", "scores")
+alpaca_runs_file <- here("data", "data_cleaning_general", "alpaca-runs-clean.csv")
+alpaca_trials_file <- here("data", "raw", "alpaca_trials.csv")
+alpaca_corpus_file <- here("data", "raw", "alpaca_corpus.csv")
+
+results_dir <- here("results")
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+
+scores_all <- read.csv(file.path(scores_dir, "scores_all_apps_rt-3-75_5-875-7917_math.csv"))
+
+# Keep only students with at least one arithmetic task score
+math_tasks <- c("arf_prod", "arf_2afc", "calf_prod", "calf_6afc")
+scores_all <- scores_all[rowSums(!is.na(scores_all[, math_tasks])) > 0, ]
+
+scores_all <- scores_all %>%
+  mutate(grade_as_int = as.integer(case_when(user_grade_at_run == "Kindergarten" ~ "0",
+                                             .default = user_grade_at_run)))
+```
+
+# Score distribution plot
+
+```{r}
+plot_score_dist <- function(var, title, binwidth, ymax, xlim = NULL){
+  scores <- scores_all %>%
+    dplyr::select(score = all_of(var)) %>%
+    filter(!is.na(score))
+  score_mean <- mean(scores$score)
+
+  ggplot(scores, aes(x = score)) +
+    geom_histogram(aes(y = after_stat(density)), binwidth = binwidth, boundary = 0,
+                   fill = "gray", color = "white", linewidth = 0.3) +
+    geom_density(color = "black", linewidth = 1, adjust = 1.5) +
+    geom_vline(xintercept = score_mean, linetype = "dashed", linewidth = 0.9, color = "red") +
+    scale_y_continuous(breaks = seq(0, ymax, length.out = 5), limits = c(0, ymax),
+                       expand = expansion(mult = c(0, 0.02))) +
+    coord_cartesian(xlim = xlim) +
+    labs(title = title, x = NULL, y = NULL) +
+    theme_minimal(base_size = 20) +
+    theme(text = element_text(family = "Arial"),
+          plot.title = element_text(size = 20, hjust = 0.5, face = "bold"),
+          panel.grid.minor = element_blank(),
+          panel.grid.major.x = element_blank(),
+          axis.text = element_text(color = "black"))
+}
+
+axis_label <- function(label, rot = 0) textGrob(label, rot = rot, gp = gpar(fontsize = 20, fontfamily = "Arial"))
+```
+
+# Supplement 3
+
+## Table S3: AlPaCa descriptives by grade bin
+
+```{r}
+alpaca_scores <- scores_all %>%
+  dplyr::select(ID, grade_as_int, score = alpaca_score) %>%
+  filter(!is.na(score)) %>%
+  mutate(grade_bin = case_when(grade_as_int %in% c(0,1) ~ "K-1",
+                               grade_as_int %in% c(2,3,4) ~ "2-4",
+                               grade_as_int %in% c(5,6) ~ "5-6",
+                               grade_as_int %in% c(7,8) ~ "7-8",
+                               grade_as_int %in% c(9,10,11,12) ~ "9-12"))
+```
+
+### Item reached
+
+```{r}
+alpaca_runs <- read.csv(alpaca_runs_file)
+
+alpaca_trials <- read.csv(alpaca_trials_file) %>%
+  rename(ID = assessment_pid) %>%
+  filter(run_id %in% alpaca_runs$run_id,
+         assessment_stage == "test_response",
+         ID %in% alpaca_scores$ID)
+
+# Load the corpus to get item position
+alpaca_corpus <- read.csv(alpaca_corpus_file)
+corpus_position <- data.frame(problem_id_corrected = unique(alpaca_corpus$PID)) %>%
+  mutate(position = row_number())
+
+alpaca_trials <- alpaca_trials %>%
+  left_join(corpus_position, by = "problem_id_corrected") %>%
+  arrange(ID, server_timestamp)
+
+get_stop_trial <- function(correct, window = 5, max_correct = 1) {
+  for (i in seq_along(correct)) {
+    if (i >= window && sum(correct[(i - window + 1):i]) <= max_correct) return(i)
+  }
+  length(correct)  # stopping rule never met: reached the end of the corpus
+}
+
+# Get the farthest item reached
+alpaca_item_reached <- alpaca_trials %>%
+  group_by(ID) %>%
+  mutate(trial = row_number()) %>%
+  filter(trial <= get_stop_trial(correct_clean)) %>%
+  summarise(item_reached = max(position))
+```
+
+### Descriptives
+
+```{r}
+alpaca_scores <- alpaca_scores %>%
+  left_join(alpaca_item_reached, by = "ID")
+
+alpaca_descriptives <- bind_rows(mutate(alpaca_scores, grade_bin = "All"), alpaca_scores) %>%
+  mutate(grade_bin = factor(grade_bin, levels = c("All","K-1","2-4","5-6","7-8","9-12"))) %>%
+  group_by(grade_bin) %>%
+  summarise(n = n(),
+            mean = round(mean(score), 2),
+            sd = round(sd(score), 2),
+            min = round(min(score), 2),
+            max = round(max(score), 2),
+            skew = round(psych::skew(score), 2),
+            excess_kurtosis = round(psych::kurtosi(score), 2),
+            mean_item_reached = round(mean(item_reached), 2))
+
+alpaca_descriptives
+
+write.csv(alpaca_descriptives, file.path(results_dir, "sup3_table1_alpaca_descriptives.csv"), row.names = FALSE)
+```
+
+## Figure S3: AlPaCa score distribution
+
+```{r}
+p_alpaca <- plot_score_dist("alpaca_score", NULL, 0.25, ymax = 0.48)
+
+alpaca_dist_plot <- arrangeGrob(p_alpaca, left = axis_label("Density", rot = 90), bottom = axis_label("Score"))
+grid.newpage()
+grid.draw(alpaca_dist_plot)
+
+ggsave(file.path(results_dir, "sup3_figure1_alpaca_distribution.png"), plot = alpaca_dist_plot, width = 10, height = 6, dpi = 300, bg = "white")
+```
+
+# Supplement 8
+
+## Table S8: Reading measure descriptives
+
+```{r}
+reading_measures <- c(SWR = "swr_score", SRE = "sre_score", PA = "pa_score")
+
+reading_descriptives <- scores_all %>%
+  dplyr::select(ID, grade_as_int, all_of(reading_measures)) %>%
+  pivot_longer(-c(ID, grade_as_int), names_to = "measure", values_to = "score") %>%
+  filter(!is.na(score)) %>%
+  group_by(measure) %>%
+  summarise(grade_range = paste0(ifelse(min(grade_as_int) == 0, "K", min(grade_as_int)), "-", max(grade_as_int)),
+            n = n(),
+            mean = round(mean(score), 2),
+            sd = round(sd(score), 2),
+            min = round(min(score), 2),
+            max = round(max(score), 2),
+            skew = round(psych::skew(score), 2),
+            excess_kurtosis = round(psych::kurtosi(score), 2)) %>%
+  mutate(measure = factor(measure, levels = names(reading_measures))) %>%
+  arrange(measure)
+
+reading_descriptives
+
+write.csv(reading_descriptives, file.path(results_dir, "sup8_table1_reading_descriptives.csv"), row.names = FALSE)
+```
+
+## Figure S8: Reading measure score distributions
+
+```{r}
+p_swr <- plot_score_dist("swr_score", "SWR", 0.5, ymax = 0.32)
+p_sre <- plot_score_dist("sre_score", "SRE", 5, ymax = 0.024)
+p_pa <- plot_score_dist("pa_score", "PA", 0.25, ymax = 0.48, xlim = c(-3, 3))
+
+reading_dist_plot <- arrangeGrob(p_swr, p_sre, p_pa, ncol = 3, left = axis_label("Density", rot = 90), bottom = axis_label("Score"))
+grid.newpage()
+grid.draw(reading_dist_plot)
+
+ggsave(file.path(results_dir, "sup8_figure1_reading_distributions.png"), plot = reading_dist_plot, width = 16, height = 6, dpi = 300, bg = "white")
+```

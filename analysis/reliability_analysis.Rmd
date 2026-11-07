@@ -1,0 +1,309 @@
+---
+title: "Reliability"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This script computes the split-half reliabilities of the ARF, CALF and RT control tasks. It saves:
+
+1. The reliability of each task and modality, overall (partialing out grade), by grade bin and for the adults (Table 1; Table S9.1).
+2. The reliability of each RT control block for the whole sample (reported in the text).
+3. The reliability by ALPACA math ability quintile (Table S7.1; Table S9.2).
+4. The score mean (SD) and range by ALPACA math ability quintile (Table S7.2; Table S9.3).
+5. The reliability of the residual scores, after controlling for simple response-entering speed, overall, by grade bin and by ALPACA quintile (Table S7.3; Table S9.4).
+
+# Load libraries
+
+```{r}
+library(tidyverse)
+library(here)
+library(splithalfr) # spearman_brown
+```
+
+# Paths and settings
+
+```{r}
+# "cleaned" for the fully cleaned scores, "no_cleaning" for the uncleaned scores
+version <- "cleaned"
+
+scores_dir <- here("data", "scores")
+
+# Each version: its input files, where its results go, and the output file names 
+versions <- list(
+  cleaned     = list(scores_file = "scores_combined_rt-3-75_5-875-7917_math.csv",       
+                     all_apps_file = "scores_all_apps_rt-3-75_5-875-7917_math.csv",    
+                     results_dir = here("results"),
+                     adults_file = "table1_adults_reliability.csv",                   
+                     files = c(rel_grade_bin = "table1_reliability_grade_bin.csv",
+                               rel_rtControl = "reliability_rtControl.csv",
+                               rel_ability = "sup7_table1_reliability_alpaca_ability.csv",
+                               descriptives_ability = "sup7_table2_descriptives_alpaca_ability.csv",
+                               rel_residual = "sup7_table3_residual_reliability.csv")),
+  no_cleaning = list(scores_file = "scores_combined_no_cleaning.csv",
+                     all_apps_file = "scores_all_apps_no_cleaning.csv",
+                     results_dir = here("results", "no_cleaning"),
+                     adults_file = "sup9_table1_adults_reliability.csv",
+                     files = c(rel_grade_bin = "sup9_table1_reliability_grade_bin.csv",
+                               rel_rtControl = "reliability_rtControl.csv",
+                               rel_ability = "sup9_table2_reliability_alpaca_ability.csv",
+                               descriptives_ability = "sup9_table3_descriptives_alpaca_ability.csv",
+                               rel_residual = "sup9_table4_residual_reliability.csv"))
+)
+
+scores_file <- versions[[version]]$scores_file
+all_apps_file <- versions[[version]]$all_apps_file
+results_dir <- versions[[version]]$results_dir
+adults_file <- versions[[version]]$adults_file
+output_files <- versions[[version]]$files
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+
+sub_data <- read.csv(file.path(scores_dir, scores_file))
+scores_all <- read.csv(file.path(scores_dir, all_apps_file))
+```
+
+# Table 1: Split-half reliability by grade bin and for adults
+
+```{r}
+grade_bins_df <- sub_data %>%
+  dplyr::select(ID,
+                arf_prod, arf_2afc, calf_prod, calf_6afc,
+                even_arf_prod, odd_arf_prod,
+                even_arf_2afc, odd_arf_2afc,
+                even_calf_prod, odd_calf_prod,
+                even_calf_6afc, odd_calf_6afc,
+                user_grade_at_run) %>%
+  pivot_longer(
+    cols = c(arf_prod, arf_2afc, calf_prod, calf_6afc,
+             even_arf_prod, odd_arf_prod,
+             even_arf_2afc, odd_arf_2afc,
+             even_calf_prod, odd_calf_prod,
+             even_calf_6afc, odd_calf_6afc),
+    names_to = c("prefix", "condition"),
+    names_pattern = "^(even|odd)?_?(arf_prod|arf_2afc|calf_prod|calf_6afc)$",
+    values_to = "value"
+  ) %>%
+  mutate(prefix = case_when(
+    prefix == "" ~ "score",
+    prefix %in% c("even", "odd") ~ paste0(prefix, "_score")
+  )) %>%
+  pivot_wider(
+    names_from = prefix,
+    values_from = value
+  ) %>%
+  mutate(grade_as_int = as.integer(case_when(user_grade_at_run == "Kindergarten" ~ "0",
+                                             .default = user_grade_at_run))) %>%
+  mutate(bin_char = case_when(grade_as_int %in% c(0,1) ~ "K-1",
+                              grade_as_int %in% c(2,3,4) ~ "2-4",
+                              grade_as_int %in% c(5,6) ~ "5-6",
+                              grade_as_int %in% c(7,8) ~ "7-8",
+                              grade_as_int %in% c(9,10,11,12) ~ "9-12")) %>%
+  mutate(bin_char = factor(bin_char, levels = c("K-1","2-4","5-6","7-8","9-12"))) %>%
+  drop_na()
+   
+# Overall reliability
+overall_rel_df <- map_dfr(c("arf_prod", "arf_2afc", "calf_prod", "calf_6afc"), function(task) {
+  even <- sub_data[[paste0("grade_resid_even_", task)]]
+  odd <- sub_data[[paste0("grade_resid_odd_", task)]]
+  keep <- !is.na(even) & !is.na(odd)
+  tibble(condition = task, count = sum(keep), reliability = spearman_brown(even[keep], odd[keep]))
+}) %>%
+  mutate(bin_char="All")
+
+# By grade bin
+grade_lm_df<-grade_bins_df %>% 
+  group_by(condition,bin_char) %>%
+  summarise(count=n(),
+            reliability=spearman_brown(even_score,odd_score),
+            .groups="drop") %>% 
+  mutate(bin_char=as.character(bin_char))
+
+to_save_rel_ability <- bind_rows(overall_rel_df, grade_lm_df) %>%
+  mutate(rel = paste0(sub("^0", "", sprintf("%.2f", reliability)), " (", count, ")"),
+         condition = factor(condition, levels = c("arf_prod", "arf_2afc", "calf_prod", "calf_6afc")),
+         bin_char = factor(bin_char, levels = c("All", "K-1", "2-4", "5-6", "7-8", "9-12"))) %>%
+  dplyr::select(grades = bin_char, condition, rel) %>%
+  arrange(condition) %>%
+  pivot_wider(names_from = condition, values_from = rel) %>%
+  arrange(grades) %>%
+  rename(arf_fr = arf_prod, arf_fc = arf_2afc, calf_fr = calf_prod, calf_fc = calf_6afc) %>%
+  mutate(across(everything(), ~replace_na(as.character(.), ""))) %>%
+  bind_rows(read.csv(file.path(results_dir, adults_file), colClasses = "character"))
+
+to_save_rel_ability
+
+write.csv(to_save_rel_ability,file.path(results_dir, output_files["rel_grade_bin"]),row.names = FALSE)
+```
+
+# RT control reliability
+
+```{r}
+rt_blocks <- c(fr = "production", "2afc" = "2afc", "6afc" = "6afc")
+
+rtControl_rel <- imap_dfr(rt_blocks, function(block, block_name) {
+  halves <- sub_data[complete.cases(sub_data[, paste0(c("rtControl_first_", "rtControl_second_"), block)]), ]
+  reliability <- spearman_brown(halves[[paste0("rtControl_first_", block)]], halves[[paste0("rtControl_second_", block)]])
+  tibble(condition = block_name, rel = paste0(sub("^0", "", sprintf("%.2f", reliability)), " (", nrow(halves), ")"))
+}) %>%
+  pivot_wider(names_from = condition, values_from = rel)
+
+rtControl_rel
+
+write.csv(rtControl_rel, file.path(results_dir, output_files["rel_rtControl"]), row.names = FALSE)
+```
+
+# Supplement 7
+
+## Table S7.1: Split-half reliability by math ability
+
+```{r}
+ability_bins_df<-scores_all %>% 
+  dplyr::select(ID,alpaca_score,even_arf_prod,odd_arf_prod,even_arf_2afc,odd_arf_2afc,even_calf_prod,odd_calf_prod,even_calf_6afc,odd_calf_6afc,user_grade_at_run) %>% 
+  pivot_longer(
+    cols = c(even_arf_prod, odd_arf_prod,
+             even_arf_2afc, odd_arf_2afc,
+             even_calf_prod, odd_calf_prod,
+             even_calf_6afc, odd_calf_6afc),
+    names_to = c("prefix", "condition"),
+    names_pattern = "(even|odd)?_?(.*)",
+    values_to = "value"
+  ) %>%
+  mutate(prefix = ifelse(prefix == "", "score", paste0(prefix, "_score"))) %>% 
+  pivot_wider(
+    names_from = prefix,
+    values_from = value
+  ) %>% 
+  mutate(
+    bin = cut(
+      alpaca_score,
+      breaks = quantile(alpaca_score, probs = c(0, 0.2, 0.4, 0.6, 0.8, 1), na.rm = TRUE),
+      include.lowest = TRUE,
+      labels =1:5
+    )
+  ) %>% 
+  mutate(bin_char = case_when(bin == 1 ~ "1 [0-20%]",
+                              bin == 2 ~ "2 (20-40%]",
+                              bin == 3 ~ "3 (40-60%]",
+                              bin == 4 ~ "4 (60-80%]",
+                              bin == 5 ~ "5 (80-100%]")) %>% 
+  mutate(bin_char = factor(bin_char, levels = c("1 [0-20%]", "2 (20-40%]", "3 (40-60%]", "4 (60-80%]", "5 (80-100%]"))) %>% 
+  drop_na()
+
+to_save_rel_ability<-ability_bins_df %>% 
+  group_by(condition,bin_char) %>%
+  summarise(count=n(),
+            reliability=spearman_brown(even_score,odd_score),
+            .groups="drop") %>% 
+  mutate(rel_n=paste0(sub("^0", "", sprintf("%.2f", reliability)), " (", count, ")")) %>% 
+  dplyr::select(condition,rel_n,bin_char) %>% 
+  mutate(condition = factor(condition, levels = c("arf_prod", "arf_2afc", "calf_prod", "calf_6afc"))) %>% 
+  arrange(condition,bin_char) %>% 
+  pivot_wider(names_from = condition, values_from = rel_n) %>% 
+  mutate(across(everything(), ~replace_na(., "")))
+
+to_save_rel_ability
+
+write.csv(to_save_rel_ability,file.path(results_dir, output_files["rel_ability"]),row.names = FALSE)
+```
+
+## Table S7.2: Descriptive statistics by math ability
+
+```{r}
+task_labels<-c(arf_prod = "arf_fr", arf_2afc = "arf_fc", calf_prod = "calf_fr", calf_6afc = "calf_fc")
+
+sd_range_ability<-ability_bins_df %>%
+  left_join(scores_all %>%
+              dplyr::select(ID, arf_prod, arf_2afc, calf_prod, calf_6afc) %>%
+              pivot_longer(-ID, names_to = "condition", values_to = "score"),
+            by = c("ID", "condition")) %>%
+  group_by(condition, bin_char) %>%
+  summarise(mean_sd = sprintf("%.2f (%.2f)", mean(score, na.rm = TRUE), sd(score, na.rm = TRUE)),
+            range = paste0("[", round(min(score, na.rm = TRUE), 2), ", ", round(max(score, na.rm = TRUE), 2), "]"),
+            .groups = "drop") %>%
+  mutate(condition = factor(task_labels[condition], levels = task_labels)) %>%
+  pivot_longer(c(mean_sd, range), names_to = "stat", values_to = "value") %>%
+  mutate(stat = factor(stat, levels = c("mean_sd", "range"))) %>%
+  arrange(condition, stat, bin_char) %>%
+  pivot_wider(names_from = c(condition, stat), values_from = value, names_sep = "_")
+
+sd_range_ability
+
+write.csv(sd_range_ability,file.path(results_dir, output_files["descriptives_ability"]),row.names = FALSE)
+```
+
+
+
+## Table S7.3: Split-half reliability after controlling for simple response-entering speed
+
+```{r}
+residual_rel<-function(data, group_col){
+  data %>% 
+    group_by(condition, group = .data[[group_col]]) %>% 
+    summarise(count=n(),
+              reliability=spearman_brown(resid_score_even_score,resid_score_odd_score),
+              .groups="drop") %>% 
+    mutate(group=as.character(group))
+}
+
+# Overall and by grade bin
+grade_resid_df<-sub_data %>% 
+  dplyr::select(ID,arf_prod,arf_2afc,calf_prod,calf_6afc,resid_score_even_arf_prod,resid_score_odd_arf_prod,resid_score_even_arf_2afc,resid_score_odd_arf_2afc,resid_score_even_calf_prod,resid_score_odd_calf_prod,resid_score_even_calf_6afc,resid_score_odd_calf_6afc,user_grade_at_run) %>% 
+  pivot_longer(
+    cols = c(arf_prod, arf_2afc, calf_prod, calf_6afc,
+             resid_score_even_arf_prod,resid_score_odd_arf_prod,resid_score_even_arf_2afc,resid_score_odd_arf_2afc,resid_score_even_calf_prod,resid_score_odd_calf_prod,resid_score_even_calf_6afc,resid_score_odd_calf_6afc),
+    names_to = c("prefix", "condition"),
+    names_pattern = "(resid_score_even|resid_score_odd)?_?(.*)",
+    values_to = "value"
+  ) %>%
+  mutate(prefix = ifelse(prefix == "", "score", paste0(prefix, "_score"))) %>% 
+  pivot_wider(names_from = prefix, values_from = value) %>% 
+  mutate(grade_as_int=as.integer(case_when(user_grade_at_run == "Kindergarten" ~ "0",
+                                           .default = user_grade_at_run))) %>% 
+  mutate(bin_char = case_when(grade_as_int %in% c(0,1) ~ "K-1",
+                              grade_as_int %in% c(2,3,4) ~ "2-4",
+                              grade_as_int %in% c(5,6) ~ "5-6",
+                              grade_as_int %in% c(7,8) ~ "7-8",
+                              grade_as_int %in% c(9,10,11,12) ~ "9-12"),
+         all = "All") %>% 
+  drop_na()
+
+# Alpaca ability quintile
+ability_resid_df<-scores_all %>% 
+  dplyr::select(ID,alpaca_score,resid_score_even_arf_prod,resid_score_odd_arf_prod,resid_score_even_arf_2afc,resid_score_odd_arf_2afc,resid_score_even_calf_prod,resid_score_odd_calf_prod,resid_score_even_calf_6afc,resid_score_odd_calf_6afc,user_grade_at_run) %>% 
+  pivot_longer(
+    cols = c(resid_score_even_arf_prod,resid_score_odd_arf_prod,resid_score_even_arf_2afc,resid_score_odd_arf_2afc,resid_score_even_calf_prod,resid_score_odd_calf_prod,resid_score_even_calf_6afc,resid_score_odd_calf_6afc),
+    names_to = c("prefix", "condition"),
+    names_pattern = "(resid_score_even|resid_score_odd)?_?(.*)",
+    values_to = "value"
+  ) %>%
+  mutate(prefix = ifelse(prefix == "", "score", paste0(prefix, "_score"))) %>% 
+  pivot_wider(names_from = prefix, values_from = value) %>% 
+  mutate(bin = cut(alpaca_score,
+                   breaks = quantile(alpaca_score, probs = c(0, 0.2, 0.4, 0.6, 0.8, 1), na.rm = TRUE),
+                   include.lowest = TRUE,
+                   labels = c("1 [0-20%]", "2 (20-40%]", "3 (40-60%]", "4 (60-80%]", "5 (80-100%]"))) %>% 
+  drop_na()
+
+row_order<-c("All", "Grades", "K-1", "2-4", "5-6", "7-8", "9-12",
+             "Ability Percentile Range", "1 [0-20%]", "2 (20-40%]", "3 (40-60%]", "4 (60-80%]", "5 (80-100%]")
+
+tableS7_3<-bind_rows(residual_rel(grade_resid_df, "all"),
+                     residual_rel(grade_resid_df, "bin_char"),
+                     residual_rel(ability_resid_df, "bin")) %>% 
+  mutate(rel = paste0(sub("^0", "", sprintf("%.2f", reliability)), " (", count, ")"),
+         condition = factor(condition, levels = c("arf_prod", "arf_2afc", "calf_prod", "calf_6afc"),
+                            labels = c("arf_fr", "arf_fc", "calf_fr", "calf_fc"))) %>% 
+  arrange(condition) %>% 
+  dplyr::select(group, condition, rel) %>% 
+  pivot_wider(names_from = condition, values_from = rel) %>% 
+  bind_rows(tibble(group = c("Grades", "Ability Percentile Range"))) %>%
+  mutate(group = factor(group, levels = row_order)) %>% 
+  arrange(group) %>% 
+  mutate(across(everything(), ~replace_na(as.character(.), "")))
+
+tableS7_3
+
+write.csv(tableS7_3,file.path(results_dir, output_files["rel_residual"]),row.names = FALSE)
+```

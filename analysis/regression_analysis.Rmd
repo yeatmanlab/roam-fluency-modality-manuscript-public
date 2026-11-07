@@ -1,0 +1,147 @@
+---
+title: "Regression Analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This script fits linear mixed-effects models of the ARF and CALF scores on modality and task. It saves:
+
+1. The combined model (modality x task) and the models for each task, controlling for grade and device (Table 6; Table S9.8).
+2. The four pre-registered models, controlling for grade and, in models 3 and 4, the RT control score (Table S6; cleaned scores only).
+
+# Load libraries
+
+```{r}
+library(tidyverse)
+library(here)
+library(lme4)        # lmer
+library(lmerTest)    # p-values for the fixed effects
+library(performance) # icc, r2
+```
+
+# Paths and settings
+
+```{r}
+# "cleaned" for the fully cleaned scores, "no_cleaning" for the uncleaned scores
+version <- "cleaned"
+
+scores_dir <- here("data", "scores")
+
+# Each version: its scores file, where its results go, and the table names
+versions <- list(
+  cleaned     = list(scores_file = "scores_combined_rt-3-75_5-875-7917_math.csv",
+                     results_dir = here("results"),
+                     task_models_file = "table6_regression_task_models.csv",
+                     preregistered_file = "sup6_table1_regression_preregistered.csv"),
+  no_cleaning = list(scores_file = "scores_combined_no_cleaning.csv",
+                     results_dir = here("results", "no_cleaning"),
+                     task_models_file = "sup9_table8_regression_task_models.csv",
+                     preregistered_file = NULL)
+)
+
+results_dir <- versions[[version]]$results_dir
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+
+sub_data <- read.csv(file.path(scores_dir, versions[[version]]$scores_file))
+```
+
+# Model results table
+
+```{r}
+term_labels <- c("(Intercept)" = "Intercept",
+                 "Grade" = "Grade",
+                 "devicemobile" = "Device [tablet]",
+                 "taskARF" = "Task [ARF]",
+                 "modalityFC" = "Modality [FC]",
+                 "modalityFC:taskARF" = "Modality [FC] x Task [ARF]",
+                 "RT_Control_Score" = "RT Control",
+                 "ID" = "Between Participant",
+                 "Residual" = "Within Participant")
+
+model_column <- function(mod, model_name) {
+  coefs <- as.data.frame(summary(mod)$coefficients)
+  stars <- as.character(cut(coefs[["Pr(>|t|)"]], breaks = c(-Inf, 0.001, 0.01, 0.05, 0.1, Inf),
+                            labels = c("***", "**", "*", ".", "")))
+  fixed <- tibble(term = rownames(coefs), value = paste0(sprintf("%.3f", coefs$Estimate), stars))
+
+  random <- as.data.frame(VarCorr(mod)) %>%
+    transmute(term = grp, value = sprintf("%.2f", vcov))
+
+  stats <- tibble(term = c("ICC (adjusted)", "Conditional R2", "Number of participants"),
+                  value = c(sprintf("%.2f", performance::icc(mod)$ICC_adjusted),
+                            sprintf("%.2f", performance::r2(mod)$R2_conditional),
+                            as.character(ngrps(mod)[["ID"]])))
+
+  bind_rows(fixed, random, stats) %>%
+    mutate(term = recode(term, !!!term_labels)) %>%
+    rename(!!model_name := value)
+}
+
+results_table <- function(models) {
+  imap(models, model_column) %>%
+    reduce(full_join, by = "term") %>%
+    mutate(term = factor(term, levels = c(term_labels, "ICC (adjusted)", "Conditional R2", "Number of participants"))) %>%
+    arrange(term) %>%
+    mutate(term = as.character(term)) %>%
+    add_row(term = "Fixed Effects (b)", .before = 1) %>%
+    add_row(term = "Random Effects (Variance)", .before = which(.$term == "Between Participant")) %>%
+    mutate(across(everything(), ~ replace_na(.x, "")))
+}
+```
+
+# Table 6: Modality and task models, controlling for grade and device
+
+```{r}
+lm_data <- sub_data %>%
+  dplyr::select(ID, arf_prod, arf_2afc, calf_prod, calf_6afc, user_grade_at_run, device) %>%
+  drop_na() %>%
+  pivot_longer(cols = c(arf_prod, arf_2afc, calf_prod, calf_6afc), names_to = "condition", values_to = "score") %>%
+  mutate(task = factor(ifelse(grepl("arf", condition), "ARF", "CALF"), levels = c("CALF", "ARF")),
+         modality = factor(ifelse(grepl("prod", condition), "FR", "FC"), levels = c("FR", "FC")),
+         Grade = as.integer(case_when(user_grade_at_run == "Kindergarten" ~ "0", .default = user_grade_at_run)),
+         Grade = Grade - min(Grade))
+
+m_task <- lmer(score ~ modality*task + Grade + device + (1|ID), data = lm_data)
+m_arf <- lmer(score ~ modality + Grade + device + (1|ID), data = lm_data %>% filter(task == "ARF"))
+m_calf <- lmer(score ~ modality + Grade + device + (1|ID), data = lm_data %>% filter(task == "CALF"))
+
+table6 <- results_table(list(combined_model = m_task, arf_model = m_arf, calf_model = m_calf))
+
+table6
+
+write.csv(table6, file.path(results_dir, versions[[version]]$task_models_file), row.names = FALSE)
+```
+
+# Table S6: Pre-registered models
+
+```{r}
+if (!is.null(versions[[version]]$preregistered_file)) {
+  lm_data_rt <- sub_data %>%
+    dplyr::select(ID, arf_prod, arf_2afc, calf_prod, calf_6afc,
+                  rtControl_score_production, rtControl_score_6afc, rtControl_score_2afc, user_grade_at_run, device) %>%
+    drop_na() %>%
+    pivot_longer(cols = c(arf_prod, arf_2afc, calf_prod, calf_6afc), names_to = "condition", values_to = "score") %>%
+    mutate(RT_Control_Score = case_when(condition %in% c("arf_prod", "calf_prod") ~ rtControl_score_production,
+                                        condition == "arf_2afc" ~ rtControl_score_2afc,
+                                        condition == "calf_6afc" ~ rtControl_score_6afc),
+           RT_Control_Score = RT_Control_Score - mean(RT_Control_Score),
+           task = factor(ifelse(grepl("arf", condition), "ARF", "CALF"), levels = c("CALF", "ARF")),
+           modality = factor(ifelse(grepl("prod", condition), "FR", "FC"), levels = c("FR", "FC")),
+           Grade = as.integer(case_when(user_grade_at_run == "Kindergarten" ~ "0", .default = user_grade_at_run)),
+           Grade = Grade - min(Grade))
+
+  m1 <- lmer(score ~ task + Grade + (1|ID), data = lm_data_rt)
+  m2 <- lmer(score ~ modality*task + Grade + (1|ID), data = lm_data_rt)
+  m3 <- lmer(score ~ task + Grade + RT_Control_Score + (1|ID), data = lm_data_rt)
+  m4 <- lmer(score ~ modality*task + Grade + RT_Control_Score + (1|ID), data = lm_data_rt)
+
+  tableS6 <- results_table(list(model_1 = m1, model_2 = m2, model_3 = m3, model_4 = m4))
+
+  print(tableS6)
+
+  write.csv(tableS6, file.path(results_dir, versions[[version]]$preregistered_file), row.names = FALSE)
+}
+```

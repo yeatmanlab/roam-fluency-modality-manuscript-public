@@ -1,0 +1,328 @@
+---
+title: "Cleaning ARF and CALF: RT control and participant exclusions"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This script:
+
+1. Splits the trials into the RT control block and the four arithmetic tasks (ARF FR, ARF FC, CALF FR, CALF FC), and saves them uncleaned.
+2. Records the device each student used.
+3. Removes outlier trials from the RT control block, then flags students with too few RT control trials or low RT control accuracy.
+4. Removes students who did not pass the RT control from the matching arithmetic tasks.
+5. Removes students who responded very fast (and, for FC, near chance), and plots these cutoffs (Figure S4).
+6. Removes K-1 students from CALF (CALF is not analysed for K-1).
+7. Saves the cleaned files used by `get_scores_df.Rmd`.
+
+# Load libraries
+
+```{r}
+library(tidyverse)
+library(here)
+library(ggExtra)   # ggMarginal, for the marginal histograms in Figure S4
+library(gridExtra) # arrangeGrob, to lay out Figure S4
+library(grid)      # textGrob, rectGrob, for the Figure S4 labels
+```
+
+# Paths
+
+```{r}
+savepath <- paste0(here("data"), "/")
+dir.create(paste0(savepath, "cleaning_arf_calf"), recursive = TRUE, showWarnings = FALSE)
+
+results_dir <- here("results")
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+# Load the cleaned trial data
+
+```{r}
+arf_data<-read.csv(paste0(savepath,"data_cleaning_1/arf-trials-clean.csv")) %>%
+  filter(assessment_stage == "test_response")
+calf_data<-read.csv(paste0(savepath,"data_cleaning_1/calf-trials-clean.csv")) %>%
+  filter(assessment_stage == "test_response")
+```
+
+# Split and save the uncleaned task data
+
+```{r}
+# The RT control block is run within ARF, so it comes from the ARF trials
+rt_block<-arf_data %>%
+  filter(grepl("rtControl",meta_data.corpus_name))
+
+arf_production <- arf_data %>%
+  filter(str_starts(meta_data.corpus_name,"production_"))
+
+arf_2afc <- arf_data %>%
+  filter(str_starts(meta_data.corpus_name,"2afc_"))
+
+calf_production <- calf_data %>%
+  filter(str_starts(meta_data.corpus_name,"production_"))
+
+calf_6afc <- calf_data %>%
+  filter(str_starts(meta_data.corpus_name,"6afc_"))
+
+write.csv(rt_block,paste0(savepath,"cleaning_arf_calf/rt-block.csv"),row.names = FALSE)
+write.csv(arf_production,paste0(savepath,"cleaning_arf_calf/arf-production.csv"),row.names = FALSE)
+write.csv(arf_2afc,paste0(savepath,"cleaning_arf_calf/arf-2afc.csv"),row.names = FALSE)
+write.csv(calf_production,paste0(savepath,"cleaning_arf_calf/calf-production.csv"),row.names = FALSE)
+write.csv(calf_6afc,paste0(savepath,"cleaning_arf_calf/calf-6afc.csv"),row.names = FALSE)
+```
+
+# Save the device each student used
+
+```{r}
+arf_pids<-arf_production %>%
+  distinct(ID,trial_type) %>%
+  mutate(device = ifelse(trial_type == "html-keyboard-response", "mobile", "desktop")) %>%
+  dplyr::select(ID,device)
+
+calf_pids<-calf_production %>%
+  distinct(ID,trial_type) %>%
+  mutate(device = ifelse(trial_type == "html-keyboard-response", "mobile", "desktop")) %>%
+  dplyr::select(ID,device)
+
+rt_block_pids<-rt_block %>%
+  distinct(ID,meta_data.corpus_name,trial_type) %>%
+  filter(meta_data.corpus_name == "rtControl_production") %>%
+  mutate(device = ifelse(trial_type == "html-keyboard-response", "mobile", "desktop")) %>%
+  dplyr::select(ID,device)
+
+all_pids<-rbind(arf_pids,calf_pids,rt_block_pids) %>%
+  distinct() %>%
+  arrange(ID)
+
+write.csv(all_pids,paste0(savepath,"cleaning_arf_calf/device-prod.csv"),row.names = FALSE)
+```
+
+# RT control
+
+## Remove outlier trials
+
+```{r}
+rt_block_out<-rt_block %>%
+  group_by(ID, meta_data.corpus_name) %>%
+  mutate(median_absolute_deviation=mad(rt),
+         median_rt=median(rt)) %>%
+  ungroup() %>%
+  mutate(rt_filter_criteria=case_when(meta_data.corpus_name=="rtControl_2afc" ~ 5*median_absolute_deviation,
+                                      meta_data.corpus_name=="rtControl_6afc" ~ 5*median_absolute_deviation,
+                                      meta_data.corpus_name=="rtControl_production" ~ 5*median_absolute_deviation),
+         rt_distance_median = rt-median_rt)%>%
+  filter(rt_distance_median<=rt_filter_criteria) %>%
+  dplyr::select(-median_rt)
+
+write.csv(rt_block_out,paste0(savepath,"cleaning_arf_calf/rt-block_outliers.csv"),row.names = FALSE)
+```
+
+## Remove students with not enough trials or low accuracy
+
+```{r}
+pid_remove_rt<-rt_block_out %>%
+  group_by(ID,meta_data.corpus_name,user_grade_at_run) %>%
+  summarise(proportion_correct=mean(correct),
+            n_trials = n()) %>%
+  filter((meta_data.corpus_name == "rtControl_production" & (n_trials<3 | proportion_correct<0.75)) |
+         (meta_data.corpus_name == "rtControl_2afc" & (n_trials<5 | proportion_correct<0.875)) |
+           (meta_data.corpus_name == "rtControl_6afc" & (n_trials<5 | proportion_correct<0.7917))) %>%
+  ungroup()
+
+pid_remove_prod<-pid_remove_rt %>%
+  filter(meta_data.corpus_name == "rtControl_production") %>%
+  dplyr::select(ID) %>%
+  pull()
+
+pid_remove_2afc<-pid_remove_rt %>%
+  filter(meta_data.corpus_name == "rtControl_2afc") %>%
+  dplyr::select(ID) %>%
+  pull()
+
+pid_remove_6afc<-pid_remove_rt %>%
+  filter(meta_data.corpus_name == "rtControl_6afc") %>%
+  dplyr::select(ID) %>%
+  pull()
+```
+
+```{r}
+# Save the cleaned RT control data
+rt_block_clean<-rt_block_out %>%
+  anti_join(pid_remove_rt, by = c("ID", "meta_data.corpus_name", "user_grade_at_run"))
+
+write.csv(rt_block_clean,paste0(savepath,"cleaning_arf_calf/rt-block_3-75_5-875-7917.csv"),row.names = FALSE)
+```
+
+# Arithmetic tasks
+
+## Remove students who did not pass the matching RT control
+
+```{r}
+arf_production<-arf_production %>%
+  filter(!(ID %in% pid_remove_prod))
+
+arf_2afc<-arf_2afc %>%
+  filter(!(ID %in% pid_remove_2afc))
+
+calf_production<-calf_production %>%
+  filter(!(ID %in% pid_remove_prod))
+
+calf_6afc<-calf_6afc %>%
+  filter(!(ID %in% pid_remove_6afc))
+
+write.csv(arf_production,paste0(savepath,"cleaning_arf_calf/arf-production-filteredControl.csv"),row.names = FALSE)
+write.csv(arf_2afc,paste0(savepath,"cleaning_arf_calf/arf-2afc-filteredControl.csv"),row.names = FALSE)
+write.csv(calf_production,paste0(savepath,"cleaning_arf_calf/calf-production-filteredControl.csv"),row.names = FALSE)
+write.csv(calf_6afc,paste0(savepath,"cleaning_arf_calf/calf-6afc-filteredControl.csv"),row.names = FALSE)
+```
+
+## Get the median RT and accuracy
+
+```{r}
+score_metrics<-function(data, computed_correct, computed_attempted){
+  data %>%
+    mutate(proportion_correct={{computed_correct}}/{{computed_attempted}},
+           log_rt=log(rt)) %>%
+    group_by(ID) %>%
+    mutate(median_rt=median(rt),
+           median_log_rt=median(log_rt)) %>%
+    ungroup()
+}
+
+arf_prod_out<-score_metrics(arf_production, scores.computed.FR.numCorrect, scores.computed.FR.numAttempted)
+arf_2afc_out<-score_metrics(arf_2afc, scores.computed.FC.numCorrect, scores.computed.FC.numAttempted)
+calf_prod_out<-score_metrics(calf_production, scores.computed.FR.numCorrect, scores.computed.FR.numAttempted)
+calf_6afc_out<-score_metrics(calf_6afc, scores.computed.FC.numCorrect, scores.computed.FC.numAttempted)
+```
+
+## Figure S4: Participant Exclusion
+
+```{r}
+theme_pub <- function(base_size = 14) {
+  theme_minimal(base_size = base_size) +
+    theme(
+      text               = element_text(family = "Arial"),
+      plot.title         = element_text(hjust = 0.5),
+      panel.grid.minor   = element_blank(),
+      panel.grid.major.x = element_blank(),
+      axis.text          = element_text(colour = "black"),
+      axis.line          = element_line(linewidth = 0.4, colour = "black"),
+      axis.ticks         = element_line(linewidth = 0.4, colour = "black"),
+      legend.key.width   = unit(1.6, "lines"),
+      plot.caption       = element_text(colour = "grey40", size = rel(0.7), hjust = 0),
+      plot.caption.position = "plot"
+    )
+}
+
+grade_levels   <- c("Kindergarten", as.character(1:12))
+grade_labels_k <- c("K", as.character(1:12))
+grade_cols <- setNames(
+  colorRampPalette(c("dodgerblue1", "firebrick1", "goldenrod1"))(13),
+  grade_labels_k
+)
+
+prep <- function(df) {
+  df %>%
+    dplyr::select(ID, median_rt, proportion_correct, user_grade_at_run) %>%
+    distinct() %>%
+    mutate(grade = factor(user_grade_at_run, levels = grade_levels,
+                          labels = grade_labels_k))
+}
+
+make_panel <- function(df, rt_cut, acc_cut = NULL) {
+  p <- prep(df) %>%
+    ggplot(aes(x = proportion_correct, y = median_rt)) +
+    geom_point(aes(colour = grade), size = 0.7, alpha = 0.4) +
+    geom_hline(yintercept = rt_cut, colour = "red", linewidth = 0.5) +
+    { if (!is.null(acc_cut)) geom_vline(xintercept = acc_cut, colour = "red", linewidth = 0.5) } +
+    scale_colour_manual(values = grade_cols) +
+    scale_x_continuous(breaks = seq(0, 1, 0.1), limits = c(0, 1)) +
+    labs(x = NULL, y = NULL) +
+    theme_pub() +
+    theme(legend.position    = "none",
+          axis.text          = element_text(colour = "black", size = 10),
+          panel.grid.major.x = element_line(colour = "grey90", linewidth = 0.3),
+          panel.grid.minor.y = element_line(colour = "grey95", linewidth = 0.25))
+  ggMarginal(p, type = "histogram", fill = "grey30", colour = "black")
+}
+
+strip <- function(lab, rot = 0, gap = unit(10, "pt")) {
+  grobTree(
+    rectGrob(width  = unit(1, "npc") - gap,
+             height = unit(1, "npc") - gap,
+             gp = gpar(fill = "grey85", col = NA)),
+    textGrob(lab, rot = rot,
+             gp = gpar(fontsize = 14, fontface = "bold", fontfamily = "Arial"))
+  )
+}
+
+combined_plot <- arrangeGrob(
+  grobs = list(
+    nullGrob(),          strip("FR"),                                strip("FC"),
+    strip("ARF",  rot = 90), make_panel(arf_prod_out,  rt_cut = 1000), make_panel(arf_2afc_out,  rt_cut = 1000, acc_cut = 0.6),
+    strip("CALF", rot = 90), make_panel(calf_prod_out, rt_cut = 3000), make_panel(calf_6afc_out, rt_cut = 3000, acc_cut = 0.25)
+  ),
+  layout_matrix = matrix(1:9, nrow = 3, byrow = TRUE),
+  widths  = unit.c(unit(2, "lines"), unit(1, "null"), unit(1, "null")),
+  heights = unit.c(unit(2, "lines"), unit(1, "null"), unit(1, "null"))
+)
+
+legend_src <- prep(arf_prod_out) %>%
+  ggplot(aes(x = proportion_correct, y = median_rt)) +
+  geom_point(aes(colour = grade)) +
+  scale_colour_manual(values = grade_cols) +
+  labs(colour = "Grade") +
+  theme_pub() +
+  theme(legend.position = "right") +
+  guides(colour = guide_legend(ncol = 1,
+                               override.aes = list(size = 3, alpha = 1)))
+
+get_only_legend <- function(plot) {
+  plot_table <- ggplot_gtable(ggplot_build(plot))
+  legend_plot <- which(sapply(plot_table$grobs, function(x) x$name) == "guide-box")
+  plot_table$grobs[[legend_plot]]
+}
+legend <- get_only_legend(legend_src)
+
+yleft  <- textGrob("Median response time (ms)", rot = 90,
+                   gp = gpar(fontsize = 14, fontfamily = "Arial"))
+bottom <- textGrob("Proportion correct",
+                   gp = gpar(fontsize = 14, fontfamily = "Arial"))
+
+panels <- arrangeGrob(combined_plot, left = yleft, bottom = bottom)
+final  <- arrangeGrob(panels, legend, nrow = 1,
+                      widths = unit.c(unit(1, "null"), sum(legend$widths)))
+
+grid::grid.newpage(); grid::grid.draw(final)
+
+ggsave(file.path(results_dir, "sup4_figure1_participant_exclusion_combined.png"),
+       plot = final, width = 10.5, height = 7.5, dpi = 300, bg = "white")
+```
+
+## Remove very fast and inaccurate students
+
+```{r}
+arf_prod_clean<-arf_prod_out %>%
+ filter(median_rt>=1000)
+
+arf_2afc_clean<-arf_2afc_out %>%
+ filter(median_rt>=1000 | proportion_correct>0.6)
+
+calf_prod_clean<-calf_prod_out %>%
+ filter(median_rt>=3000) %>%
+ filter(user_grade_at_run != "1" & user_grade_at_run != "Kindergarten")
+
+calf_6afc_clean<-calf_6afc_out %>%
+ filter(median_rt>=3000 | proportion_correct>0.25) %>%
+ filter(user_grade_at_run != "1" & user_grade_at_run != "Kindergarten")
+```
+
+## Save the cleaned data
+
+```{r}
+write.csv(arf_prod_clean,paste0(savepath,"cleaning_arf_calf/arf-production-rtFiltered-clean.csv"),row.names = FALSE)
+write.csv(arf_2afc_clean,paste0(savepath,"cleaning_arf_calf/arf-2afc-rtFiltered-clean.csv"),row.names = FALSE)
+write.csv(calf_prod_clean,paste0(savepath,"cleaning_arf_calf/calf-production-rtFiltered-clean.csv"),row.names = FALSE)
+write.csv(calf_6afc_clean,paste0(savepath,"cleaning_arf_calf/calf-6afc-rtFiltered-clean.csv"),row.names = FALSE)
+```

@@ -1,0 +1,295 @@
+---
+title: "Get Scores Prolific: ARF, CALF and RT control"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This script:
+
+1. Computes each participant's score on each task (ARF FR, ARF FC, CALF FR, CALF FC) and RT control block (FR, 2AFC, 6AFC).
+2. Computes each participant's median log RT, number correct, number attempted and accuracy (number correct / number attempted).
+3. Computes the split-half scores for reliability: the even and odd 15-second interval scores of each task, and the first and second half scores of each RT control block.
+4. Computes the RT control residuals: the residual of each task score after regressing it on the matching RT control score (FR control for the FR tasks, 2AFC control for ARF FC, 6AFC control for CALF FC).
+5. Adds each participant's age.
+6. Saves three versions of the scores, used by the analyses:
+   - `scores_combined_no_cleaning.csv`
+   - `scores_combined_rtFiltered.csv`
+   - `scores_combined_rt-3-75_5-875-7917_math.csv`
+
+# Load libraries
+
+```{r}
+library(tidyverse)
+library(here)
+```
+
+# Paths
+
+```{r}
+raw_path <- paste0(here("data", "raw", "prolific"), "/")
+savepath <- paste0(here("data"), "/")
+dir.create(paste0(savepath, "scores/prolific"), recursive = TRUE, showWarnings = FALSE)
+```
+
+# Scoring functions
+
+## RT control scores
+
+```{r}
+getRtScore<-function(rt_block){
+  rt_block %>%
+    mutate(log_rt=log(rt)) %>%
+    group_by(ID,corpus_name) %>%
+    summarise(median_log_rt=median(log_rt),
+              rt_correct=sum(correct),
+              rt_incorrect=n()-rt_correct,
+              rtControl_num_attempted = n(),
+              ) %>%
+    ungroup() %>%
+    mutate(rtControl_score = case_when(corpus_name=="2afc"~ rt_correct-rt_incorrect,
+                                corpus_name=="6afc"~ rt_correct-(0.2*rt_incorrect),
+                                corpus_name=="production" ~rt_correct
+                                ),
+           rtControl_accuracy = rt_correct/rtControl_num_attempted,
+           rtControl_num_correct = rt_correct) %>%
+    dplyr::select(-c(rt_correct,rt_incorrect)) %>%
+    pivot_wider(names_from = corpus_name, values_from = c(median_log_rt,rtControl_score,rtControl_accuracy,rtControl_num_correct,rtControl_num_attempted)) %>%
+    rename(rtControl_rt_2afc="median_log_rt_2afc",
+           rtControl_rt_6afc="median_log_rt_6afc",
+           rtControl_rt_production="median_log_rt_production")
+}
+```
+
+## ARF and CALF scores
+
+```{r}
+getTaskScore<-function(data, modality, task_name){
+  data %>%
+    mutate(log_rt=log(rt)) %>%
+    group_by(ID) %>%
+    mutate(median_log_rt=median(log_rt),
+           num_attempted = n(),
+           num_correct = sum(correct),
+           accuracy = num_correct/num_attempted,
+           score = switch(modality,
+                          "production" = num_correct,
+                          "2afc" = num_correct-(num_attempted-num_correct),
+                          "6afc" = num_correct-(0.2*(num_attempted-num_correct)))) %>%
+    ungroup() %>%
+    group_by(ID,group) %>%
+    reframe(!!task_name := score,
+            !!paste0("rt_", task_name) := median_log_rt,
+            !!paste0("num_correct_", task_name) := num_correct,
+            !!paste0("num_attempted_", task_name) := num_attempted,
+            !!paste0("accuracy_", task_name) := accuracy) %>%
+    distinct() %>%
+    pivot_longer(-c(ID,group), names_to = "task", values_to = "score")
+}
+
+getScoresMath<-function(arf_production,arf_2afc,calf_production,calf_6afc,rt_block){
+  sub_data<-bind_rows(getTaskScore(arf_production, "production", "arf_prod"),
+                      getTaskScore(arf_2afc, "2afc", "arf_2afc"),
+                      getTaskScore(calf_production, "production", "calf_prod"),
+                      getTaskScore(calf_6afc, "6afc", "calf_6afc")) %>%
+    pivot_wider(names_from = "task", values_from = "score")
+
+  full_join(sub_data, getRtScore(rt_block), by=c("ID"))
+}
+```
+
+## Arithmetic tasks split-half scores
+
+```{r}
+even_odd_interval<-function(data, modality, task_name){
+  data_intervals<-data %>%
+    dplyr::select(ID,time_elapsed,trial_num_block,corpus_name,rt,correct) %>%
+    group_by(ID,corpus_name) %>%
+    arrange(ID, corpus_name, trial_num_block) %>%
+    mutate(start_time_task=time_elapsed[which.min(trial_num_block)]-rt[which.min(trial_num_block)]) %>%
+    ungroup() %>%
+    mutate(time_from_start=time_elapsed-start_time_task,
+           interval_num=floor(time_from_start/15000)+1) %>%
+    group_by(ID,interval_num, corpus_name) %>%
+    summarise(total_correct=sum(correct, na.rm=TRUE),
+              total_incorrect=as.numeric(sum(correct == 0, na.rm=TRUE)),
+              .groups = "keep") %>%
+    mutate(score= switch(modality,
+      "production" = total_correct,
+      "2afc" = total_correct - total_incorrect,
+      "6afc" = total_correct - (0.2*total_incorrect))) %>%
+    mutate(score = replace_na(score, 0),
+           total_correct = replace_na(total_correct, 0),
+           order=ifelse(interval_num%%2, "odd", "even")) %>%
+    ungroup()
+
+  data_intervals %>%
+    group_by(ID, order) %>%
+    summarise(overall_score=sum(score),
+              overall_correct=sum(total_correct),
+              .groups = "drop") %>%
+    pivot_wider(names_from = order, values_from = c(overall_score, overall_correct)) %>%
+    transmute(ID,
+              even=replace_na(overall_score_even, 0),
+              odd=replace_na(overall_score_odd, 0),
+              even_correct=replace_na(overall_correct_even, 0),
+              odd_correct=replace_na(overall_correct_odd, 0)) %>%
+    arrange(ID) %>%
+    mutate(task=task_name)
+}
+
+# Adds the even/odd scores and number correct for all four tasks
+getEvenOddScore<-function(arf_production,arf_2afc,calf_production,calf_6afc,sub_data){
+  scores_even_odd<-rbind(even_odd_interval(arf_production, "production", "arf_prod"),
+                         even_odd_interval(arf_2afc, "2afc", "arf_2afc"),
+                         even_odd_interval(calf_6afc, "6afc", "calf_6afc"),
+                         even_odd_interval(calf_production, "production", "calf_prod")) %>%
+    pivot_wider(names_from = "task", values_from = c("even", "odd", "even_correct", "odd_correct"))
+
+  left_join(sub_data, scores_even_odd, by=c("ID"))
+}
+```
+
+## RT control split-half scores
+
+```{r}
+getRtHalfScore<-function(rt_block, sub_data){
+  rt_halves<-rt_block %>%
+    group_by(ID, corpus_name) %>%
+    arrange(trial_num_block, .by_group = TRUE) %>%
+    mutate(start_time_task=time_elapsed[which.min(trial_num_block)]-rt[which.min(trial_num_block)],
+           mid_time=(time_elapsed[which.max(trial_num_block)]-start_time_task)/2+start_time_task,
+           half=ifelse(time_elapsed<=mid_time, "first", "second")) %>%
+    group_by(ID, corpus_name, half) %>%
+    summarise(total_correct=sum(correct, na.rm=TRUE),
+              total_incorrect=sum(correct == 0, na.rm=TRUE),
+              .groups = "drop") %>%
+    mutate(score=case_when(corpus_name == "production" ~ total_correct,
+                           corpus_name == "2afc" ~ total_correct - total_incorrect,
+                           corpus_name == "6afc" ~ total_correct - (0.2*total_incorrect))) %>%
+    dplyr::select(ID, corpus_name, half, score) %>%
+    pivot_wider(names_from = half, values_from = score) %>%
+    mutate(first=replace_na(first, 0)) %>%
+    pivot_wider(names_from = corpus_name, values_from = c(first, second),
+                names_glue = "rtControl_{.value}_{corpus_name}")
+
+  left_join(sub_data, rt_halves, by=c("ID"))
+}
+```
+
+## RT control residuals
+
+```{r}
+calculateResid <- function(sub_data, math_var, control_var) {
+  math_var <- enquo(math_var)
+  control_var <- enquo(control_var)
+  newvar <- paste0("resid_score_", quo_name(math_var))
+
+  df <- sub_data %>%
+    dplyr::select(ID, !!math_var, !!control_var) %>%
+    drop_na()
+
+  form <- as.formula(paste0(quo_name(math_var), " ~ ", quo_name(control_var)))
+
+  df %>%
+    mutate(!!newvar := resid(lm(form, data = df))) %>%
+    dplyr::select(ID, !!sym(newvar))
+}
+
+# Residuals for the four task scores and their even/odd split-half scores
+getResidualScore<-function(sub_data){
+  all_resid <- reduce(list(calculateResid(sub_data, arf_prod, rtControl_score_production),
+                           calculateResid(sub_data, arf_2afc, rtControl_score_2afc),
+                           calculateResid(sub_data, calf_prod, rtControl_score_production),
+                           calculateResid(sub_data, calf_6afc, rtControl_score_6afc),
+                           calculateResid(sub_data, even_arf_prod, rtControl_score_production),
+                           calculateResid(sub_data, odd_arf_prod, rtControl_score_production),
+                           calculateResid(sub_data, even_arf_2afc, rtControl_score_2afc),
+                           calculateResid(sub_data, odd_arf_2afc, rtControl_score_2afc),
+                           calculateResid(sub_data, even_calf_prod, rtControl_score_production),
+                           calculateResid(sub_data, odd_calf_prod, rtControl_score_production),
+                           calculateResid(sub_data, even_calf_6afc, rtControl_score_6afc),
+                           calculateResid(sub_data, odd_calf_6afc, rtControl_score_6afc)),
+                      full_join,  # keep every participant with at least one residual
+                      by = c("ID"))
+
+  sub_data %>%
+    full_join(all_resid, by=c("ID"))
+}
+```
+
+## Combine everything
+
+```{r}
+prolific_demo<-read.csv(paste0(raw_path,"prolific_demo.csv"))
+
+participant_age<-prolific_demo %>%
+  filter(Status == "APPROVED") %>%
+  dplyr::select(ID, Age) %>%
+  mutate(Age=as.numeric(Age))
+
+getTaskCounts<-function(arf_production,arf_2afc,calf_production,calf_6afc,rt_block){
+  has_task<-rbind(arf_production %>% distinct(ID) %>% mutate(task="ARF_FR"),
+                  arf_2afc %>% distinct(ID) %>% mutate(task="ARF_FC"),
+                  calf_production %>% distinct(ID) %>% mutate(task="CALF_FR"),
+                  calf_6afc %>% distinct(ID) %>% mutate(task="CALF_FC"),
+                  rt_block %>% distinct(ID,corpus_name) %>% rename(task=corpus_name)) %>%
+    mutate(hasScore = 1)
+
+  print(has_task %>% count(task, name = "count"))
+  print(has_task %>% pivot_wider(names_from = task, values_from = hasScore) %>% drop_na())
+}
+
+# Reads the five data files, computes all the scores, adds age, prints the counts, and writes the scores file
+getScores<-function(rt_file, arf_prod_file, arf_2afc_file, calf_prod_file, calf_6afc_file, out_file){
+  read_trials<-function(f) read.csv(paste0(savepath, "cleaning_prolific/", f))
+
+  rt_block<-read_trials(rt_file)
+  arf_production<-read_trials(arf_prod_file)
+  arf_2afc<-read_trials(arf_2afc_file)
+  calf_production<-read_trials(calf_prod_file)
+  calf_6afc<-read_trials(calf_6afc_file)
+
+  getTaskCounts(arf_production,arf_2afc,calf_production,calf_6afc,rt_block)
+
+  scores_combined<-getScoresMath(arf_production,arf_2afc,calf_production,calf_6afc,rt_block)
+  scores_combined<-getEvenOddScore(arf_production,arf_2afc,calf_production,calf_6afc,scores_combined)
+  scores_combined<-getRtHalfScore(rt_block,scores_combined)
+  scores_combined<-getResidualScore(scores_combined)
+  scores_combined<-left_join(scores_combined,participant_age,by="ID") %>%
+    relocate(Age, .after = group)
+
+  write.csv(scores_combined,paste0(savepath,"scores/prolific/", out_file), row.names = FALSE)
+}
+```
+
+# Compute the scores
+
+## No cleaning
+
+```{r}
+# Complete data without any participant exclusion
+getScores("rt-block-init.csv", "arf-production-init.csv", "arf-2afc-init.csv", "calf-production-init.csv", "calf-6afc-init.csv",
+          "scores_combined_no_cleaning.csv")
+```
+
+## Participants who did not pass the RT control removed
+
+```{r}
+# Uncleaned RT control data; ARF and CALF without the students who did not pass the matching RT control block.
+# Used for the middle step of the exclusion counts
+getScores("rt-block-init.csv", "arf-production-filteredControl.csv", "arf-2afc-filteredControl.csv",
+          "calf-production-filteredControl.csv", "calf-6afc-filteredControl.csv",
+          "scores_combined_rtFiltered.csv")
+```
+
+## Fully cleaned
+
+```{r}
+# RT control final cleaned; ARF and CALF final cleaned
+getScores("rt-block_3-75_5-875-7917.csv", "arf-production-rtFiltered-clean.csv", "arf-2afc-rtFiltered-clean.csv",
+          "calf-production-rtFiltered-clean.csv", "calf-6afc-rtFiltered-clean.csv",
+          "scores_combined_rt-3-75_5-875-7917_math.csv")
+```

@@ -1,0 +1,117 @@
+---
+title: "Correlation Analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This script compares the ARF and CALF response modalities using their cross-modality correlations. It:
+
+1. Saves the correlations among the arithmetic fluency tasks, partialing out grade (Table 2; Table S9.5).
+2. Prints the cross-modality correlations corrected for measurement error, using the overall split-half reliabilities (partialing out grade) from reliability_analysis.Rmd (Section 3.2.2; Supplement 9.3.2).
+3. Saves the cross-modality correlations corrected for measurement error and controlling for simple response time, with the correlations between the raw and RT control residual task-half scores used to calculate them (Section 3.2.2; Supplement 9.3.2).
+
+
+# Load libraries
+
+```{r}
+library(tidyverse)
+library(here)
+```
+
+# Paths and settings
+
+```{r}
+# "cleaned" for the fully cleaned scores, "no_cleaning" for the uncleaned scores
+version <- "cleaned"
+
+scores_dir <- here("data", "scores")
+
+# Each version: its scores file, where its results go, the correlation table name,
+# and the reliability table from reliability_analysis.Rmd
+versions <- list(
+  cleaned     = list(scores_file = "scores_combined_rt-3-75_5-875-7917_math.csv",
+                     results_dir = here("results"),
+                     corr_file = "table2_correlations.csv",
+                     reliability_file = "table1_reliability_grade_bin.csv"),
+  no_cleaning = list(scores_file = "scores_combined_no_cleaning.csv",
+                     results_dir = here("results", "no_cleaning"),
+                     corr_file = "sup9_table5_correlations.csv",
+                     reliability_file = "sup9_table1_reliability_grade_bin.csv")
+)
+
+results_dir <- versions[[version]]$results_dir
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+
+sub_data <- read.csv(file.path(scores_dir, versions[[version]]$scores_file)) %>%
+  mutate(grade_as_int = as.integer(case_when(user_grade_at_run == "Kindergarten" ~ "0",
+                                             .default = user_grade_at_run)))
+```
+
+# Table 2: Correlations among the arithmetic fluency tasks
+
+```{r}
+tasks <- c("ARF FR" = "arf_prod", "ARF FC" = "arf_2afc", "CalF FR" = "calf_prod", "CalF FC" = "calf_6afc")
+
+# partialling out grade
+partial_cor <- function(x, y) {
+  sub <- sub_data[complete.cases(sub_data[, c(x, y, "grade_as_int")]), ]
+  cor(resid(lm(sub[[x]] ~ sub$grade_as_int)), resid(lm(sub[[y]] ~ sub$grade_as_int)))
+}
+
+partial_r <- outer(tasks, tasks, Vectorize(partial_cor))
+dimnames(partial_r) <- list(names(tasks), names(tasks))
+
+table2 <- matrix("", length(tasks), length(tasks), dimnames = dimnames(partial_r))
+table2[lower.tri(table2)] <- sub("^0", "", sprintf("%.2f", partial_r[lower.tri(partial_r)]))
+diag(table2) <- "-"
+
+table2
+
+write.csv(table2, file.path(results_dir, versions[[version]]$corr_file))
+```
+
+# Correlations corrected for measurement error
+
+```{r}
+reliability <- read.csv(file.path(results_dir, versions[[version]]$reliability_file)) %>%
+  filter(grades == "All") %>%
+  dplyr::select(-grades) %>%
+  mutate(across(everything(), ~ as.numeric(sub(" .*", "", .x))))
+
+disattenuate <- function(r, rel_fr, rel_fc) round(r, 2) / sqrt(rel_fr * rel_fc)
+
+cat(sprintf("Cross-modality r: ARF = %.2f, CalF = %.2f\n",
+            partial_r["ARF FC", "ARF FR"], partial_r["CalF FC", "CalF FR"]))
+cat(sprintf("Corrected for measurement error: ARF = %.2f, CalF = %.2f\n",
+            disattenuate(partial_r["ARF FC", "ARF FR"], reliability$arf_fr, reliability$arf_fc),
+            disattenuate(partial_r["CalF FC", "CalF FR"], reliability$calf_fr, reliability$calf_fc)))
+```
+
+# Correlations corrected for measurement error and simple response time
+
+```{r}
+raw_resid_cor <- function(raw_task, resid_task) {
+  x <- sub_data[[paste0("even_", raw_task)]]
+  y <- sub_data[[paste0("resid_score_odd_", resid_task)]]
+  round(cor(x, y, use = "complete.obs"), 2)
+}
+
+rt_corrected <- function(task, fr, fc) {
+  tibble(task = task,
+         matched_fr = raw_resid_cor(fr, fr),     # raw FR half with residual FR half
+         matched_fc = raw_resid_cor(fc, fc),     # raw FC half with residual FC half
+         cross_fr_fc = raw_resid_cor(fr, fc),    # raw FR half with residual FC half
+         cross_fc_fr = raw_resid_cor(fc, fr)) %>% # raw FC half with residual FR half
+    mutate(corrected_r = round(sqrt(cross_fr_fc * cross_fc_fr) / sqrt(matched_fr * matched_fc), 3))
+}
+
+rt_corrected_cor <- bind_rows(rt_corrected("ARF", "arf_prod", "arf_2afc"),
+                              rt_corrected("CalF", "calf_prod", "calf_6afc"))
+
+rt_corrected_cor
+
+write.csv(rt_corrected_cor, file.path(results_dir, "corr_corrected_rtControl.csv"), row.names = FALSE)
+```

@@ -1,0 +1,77 @@
+---
+title: "Exclusion Analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This script computes the percentage of students excluded from each task by grade bin (Table 4). Each percentage is the number excluded at that step, divided by the number of students with a score on the task before any cleaning.
+
+# Load libraries
+
+```{r}
+library(tidyverse)
+library(here)
+```
+
+# Paths
+
+```{r}
+scores_dir <- here("data", "scores")
+results_dir <- here("results")
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+
+score_no_cleaning <- read.csv(file.path(scores_dir, "scores_combined_no_cleaning.csv"))              # before any cleaning
+score_rtFiltered <- read.csv(file.path(scores_dir, "scores_combined_rtFiltered.csv"))                # students who did not pass the RT control removed
+score_final <- read.csv(file.path(scores_dir, "scores_combined_rt-3-75_5-875-7917_math.csv"))        # fully cleaned
+```
+
+# Number of students with a score at each step
+
+```{r}
+task_counts <- function(scores, count_name){
+  scores %>%
+    mutate(grade_bin = case_when(user_grade_at_run %in% c("Kindergarten", "1") ~ "K-1",
+                                 user_grade_at_run %in% c("2", "3", "4") ~ "2-4",
+                                 user_grade_at_run %in% c("5","6") ~ "5-6",
+                                 user_grade_at_run %in% c("7", "8") ~ "7-8",
+                                 user_grade_at_run %in% c("9","10","11","12") ~ "9-12")) %>%
+    dplyr::select(ID,grade_bin,arf_prod,arf_2afc,calf_prod,calf_6afc,rtControl_score_production,rtControl_score_2afc,rtControl_score_6afc) %>%
+    pivot_longer(cols = -c(ID, grade_bin), names_to = "task", values_to = "score") %>%
+    filter(!is.na(score)) %>%
+    distinct(ID, grade_bin, task) %>%
+    count(grade_bin, task, name = count_name)
+}
+
+tasks_count <- task_counts(score_no_cleaning, "initial_count") %>%
+  full_join(task_counts(score_rtFiltered, "mid_count"), by = c("grade_bin", "task")) %>%
+  full_join(task_counts(score_final, "final_count"), by = c("grade_bin", "task")) %>%
+  drop_na() %>%
+  mutate(exc_count = mid_count - final_count,
+         exc_perc = round((mid_count - final_count)/initial_count*100)) %>%
+  filter(!(task == "rtControl_score_6afc" & grade_bin == "K-1"))
+
+tasks_count
+```
+
+# Table 4: Exclusion percentage by grade bin
+
+```{r}
+table4 <- tasks_count %>%
+  mutate(task = factor(task,
+                       levels = c("arf_prod", "arf_2afc", "calf_prod", "calf_6afc", "rtControl_score_production", "rtControl_score_2afc", "rtControl_score_6afc"),
+                       labels = c("arf_fr", "arf_fc", "calf_fr", "calf_fc", "rt_fr", "rt_2afc", "rt_6afc")),
+         grade = factor(grade_bin, levels = c("K-1","2-4","5-6","7-8","9-12")),
+         exc = paste0(exc_perc, "%")) %>%
+  arrange(task) %>%
+  dplyr::select(grade, task, exc) %>%
+  pivot_wider(names_from = task, values_from = exc) %>%
+  arrange(grade) %>%
+  mutate(across(everything(), ~replace_na(as.character(.), "")))
+
+table4
+
+write.csv(table4, file.path(results_dir, "table4_exclusion_grade_bin.csv"), row.names = FALSE)
+```

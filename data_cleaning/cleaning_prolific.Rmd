@@ -1,0 +1,282 @@
+---
+title: "Cleaning Prolific: RT control and participant exclusions"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This script:
+
+1. Keeps the test trials and the participants whose Prolific submission was approved.
+2. Keeps the most recent run for each participant and task, and saves these uncleaned files.
+3. Removes outlier trials from the RT control block, then flags participants with too few RT control trials or low RT control accuracy.
+4. Removes participants who did not pass the RT control from the matching arithmetic tasks.
+5. Removes participants who responded very fast (and, for FC, near chance), and plots these cutoffs.
+6. Saves the cleaned files used by `get_scores_prolific_df.Rmd`.
+
+# Load libraries
+
+```{r}
+library(tidyverse)
+library(here)
+library(ggExtra) # ggMarginal, for the marginal histograms in the exclusion plots
+```
+
+# Paths
+
+```{r}
+raw_path <- paste0(here("data", "raw", "prolific"), "/")
+savepath <- paste0(here("data"), "/")
+dir.create(paste0(savepath, "cleaning_prolific"), recursive = TRUE, showWarnings = FALSE)
+```
+
+# Load the raw data
+
+```{r}
+rt_block <- read.csv(paste0(raw_path, "rt-block.csv"))
+arf_production <- read.csv(paste0(raw_path, "arf-production.csv"))
+arf_2afc <- read.csv(paste0(raw_path, "arf-2afc.csv"))
+calf_production <- read.csv(paste0(raw_path, "calf-production.csv"))
+calf_6afc <- read.csv(paste0(raw_path, "calf-6afc.csv"))
+prolific_demo <- read.csv(paste0(raw_path, "prolific_demo.csv"))
+
+rt_block <- rt_block %>% filter(assessment_stage == "test_response")
+arf_production <- arf_production %>% filter(assessment_stage == "test_response")
+arf_2afc <- arf_2afc %>% filter(assessment_stage == "test_response")
+calf_production <- calf_production %>% filter(assessment_stage == "test_response")
+calf_6afc <- calf_6afc %>% filter(assessment_stage == "test_response")
+```
+
+# Keep approved participants
+
+```{r}
+approved_pids<-prolific_demo %>%
+  filter(Status == "APPROVED")
+
+rt_block<-rt_block %>%
+  filter(ID %in% approved_pids$ID)
+
+arf_production<-arf_production %>%
+  filter(ID %in% approved_pids$ID)
+
+arf_2afc<-arf_2afc %>%
+  filter(ID %in% approved_pids$ID)
+
+calf_production<-calf_production %>%
+  filter(ID %in% approved_pids$ID)
+
+calf_6afc<-calf_6afc %>%
+  filter(ID %in% approved_pids$ID)
+```
+
+```{r}
+check_data<-function(data){
+  print(data %>%
+    mutate(date=substr(timeStarted,start = 1, stop = 10)) %>%
+    distinct(ID,date) %>%
+    count(date, name = "count"))
+}
+
+check_data(rt_block)
+check_data(arf_production)
+check_data(arf_2afc)
+check_data(calf_production)
+check_data(calf_6afc)
+```
+
+# Keep the most recent run
+
+```{r}
+get_recentRun<-function(data){
+  runIds<-data %>%
+    distinct(ID,runId,timeStarted) %>%
+    arrange(ID, desc(timeStarted)) %>%
+    group_by(ID) %>%
+    slice_head(n = 1) %>%
+    ungroup() %>%
+    pull(runId)
+
+  data %>%
+    filter(runId %in% runIds)
+}
+
+arf_production<-get_recentRun(arf_production)
+arf_2afc<-get_recentRun(arf_2afc)
+calf_production<-get_recentRun(calf_production)
+calf_6afc<-get_recentRun(calf_6afc)
+
+latest_run_incomplete<-rt_block %>%
+  group_by(ID,runId,timeStarted) %>%
+  summarise(n_blocks=n_distinct(corpus_name), .groups="drop") %>%
+  arrange(ID, desc(timeStarted)) %>%
+  group_by(ID) %>%
+  slice_head(n = 1) %>%
+  ungroup() %>%
+  filter(n_blocks<3) %>%
+  pull(ID)
+
+mostRecentRuns_rt<-rt_block %>%
+  distinct(ID,runId,timeStarted) %>%
+  arrange(ID, desc(timeStarted)) %>%
+  group_by(ID) %>%
+  mutate(order=row_number()) %>%
+  filter(order==1 | (ID %in% latest_run_incomplete & order==2)) %>%
+  ungroup() %>%
+  pull(runId)
+
+rt_block<-rt_block %>%
+  filter(runId %in% mostRecentRuns_rt)
+
+# save the data
+write.csv(rt_block,paste0(savepath,"cleaning_prolific/rt-block-init.csv"), row.names = FALSE)
+write.csv(arf_production,paste0(savepath,"cleaning_prolific/arf-production-init.csv"), row.names = FALSE)
+write.csv(arf_2afc,paste0(savepath,"cleaning_prolific/arf-2afc-init.csv"), row.names = FALSE)
+write.csv(calf_production,paste0(savepath,"cleaning_prolific/calf-production-init.csv"), row.names = FALSE)
+write.csv(calf_6afc,paste0(savepath,"cleaning_prolific/calf-6afc-init.csv"), row.names = FALSE)
+```
+
+# RT control
+
+## Remove outlier trials
+
+```{r}
+rt_block_out<-rt_block %>%
+  group_by(ID, corpus_name) %>%
+  mutate(median_absolute_deviation=mad(rt),
+         median_rt=median(rt)) %>%
+  ungroup() %>%
+  mutate(rt_filter_criteria=case_when(corpus_name=="2afc" ~ 5*median_absolute_deviation,
+                                      corpus_name=="6afc" ~ 5*median_absolute_deviation,
+                                      corpus_name=="production" ~ 5*median_absolute_deviation),
+         rt_distance_median = rt-median_rt)%>%
+  filter(rt_distance_median<=rt_filter_criteria) %>%
+  dplyr::select(-median_rt)
+
+write.csv(rt_block_out,paste0(savepath,"cleaning_prolific/rt-block_outliers.csv"),row.names = FALSE)
+```
+
+## Remove participants with not enough trials or low accuracy
+
+```{r}
+pid_remove_rt<-rt_block_out %>%
+  group_by(ID,corpus_name) %>%
+  summarise(proportion_correct=mean(correct),
+            n_trials = n()) %>%
+  filter((corpus_name == "production" & (n_trials<3 | proportion_correct<0.75)) |
+         (corpus_name == "2afc" & (n_trials<5 | proportion_correct<0.875)) |
+           (corpus_name == "6afc" & (n_trials<5 | proportion_correct<0.7917))) %>%
+  ungroup()
+
+pid_remove_prod<-pid_remove_rt %>%
+  filter(corpus_name == "production") %>%
+  pull(ID)
+
+pid_remove_2afc<-pid_remove_rt %>%
+  filter(corpus_name == "2afc") %>%
+  pull(ID)
+
+pid_remove_6afc<-pid_remove_rt %>%
+  filter(corpus_name == "6afc") %>%
+  pull(ID)
+```
+
+```{r}
+# Save the cleaned RT control data
+rt_block_clean<-rt_block_out %>%
+  anti_join(pid_remove_rt, by = c("ID", "corpus_name"))
+
+write.csv(rt_block_clean,paste0(savepath,"cleaning_prolific/rt-block_3-75_5-875-7917.csv"),row.names = FALSE)
+```
+
+# Arithmetic tasks
+
+## Remove participants who did not pass the matching RT control
+
+```{r}
+arf_production<-arf_production %>%
+  filter(!(ID %in% pid_remove_prod))
+
+arf_2afc<-arf_2afc %>%
+  filter(!(ID %in% pid_remove_2afc))
+
+calf_production<-calf_production %>%
+  filter(!(ID %in% pid_remove_prod))
+
+calf_6afc<-calf_6afc %>%
+  filter(!(ID %in% pid_remove_6afc))
+
+write.csv(arf_production,paste0(savepath,"cleaning_prolific/arf-production-filteredControl.csv"),row.names = FALSE)
+write.csv(arf_2afc,paste0(savepath,"cleaning_prolific/arf-2afc-filteredControl.csv"),row.names = FALSE)
+write.csv(calf_production,paste0(savepath,"cleaning_prolific/calf-production-filteredControl.csv"),row.names = FALSE)
+write.csv(calf_6afc,paste0(savepath,"cleaning_prolific/calf-6afc-filteredControl.csv"),row.names = FALSE)
+```
+
+## Get the median RT and accuracy
+
+```{r}
+score_metrics<-function(data){
+  data %>%
+    mutate(proportion_correct=scores.computed.composite.totalCorrect/scores.computed.composite.totalNumAttempted,
+           log_rt=log(rt)) %>%
+    group_by(ID) %>%
+    mutate(median_rt=median(rt),
+           median_log_rt=median(log_rt)) %>%
+    ungroup()
+}
+
+arf_prod_out<-score_metrics(arf_production)
+arf_2afc_out<-score_metrics(arf_2afc)
+calf_prod_out<-score_metrics(calf_production)
+calf_6afc_out<-score_metrics(calf_6afc)
+```
+
+## Participant exclusion plots
+
+```{r}
+plot_exclusion<-function(data, task_label, rt_cut, acc_cut = NULL){
+  p<-data %>%
+    dplyr::select(ID,median_rt,proportion_correct,group) %>%
+    distinct() %>%
+    ggplot(aes(x=proportion_correct, y=median_rt))+
+    geom_point(aes(color = factor(group)), size = 1)+
+    geom_hline(yintercept = rt_cut, color = "red")+
+    { if (!is.null(acc_cut)) geom_vline(xintercept = acc_cut, color = "red") } +
+    scale_x_continuous(breaks = seq(0,1,0.1), limits = c(0,1)) +
+    labs(x=task_label, y="Median RT (ms)") +
+    theme_minimal() +
+    theme(legend.position="none")
+  ggMarginal(p, type="histogram")
+}
+
+plot_exclusion(arf_prod_out, "ARF FR", rt_cut = 800)
+plot_exclusion(arf_2afc_out, "ARF FC", rt_cut = 800, acc_cut = 0.6)
+plot_exclusion(calf_prod_out, "CALF FR", rt_cut = 800)
+plot_exclusion(calf_6afc_out, "CALF FC", rt_cut = 800, acc_cut = 0.25)
+```
+
+## Remove very fast and inaccurate participants
+
+```{r}
+arf_prod_clean<-arf_prod_out %>%
+ filter(median_rt>=800)
+
+arf_2afc_clean<-arf_2afc_out %>%
+ filter(median_rt>=800 | proportion_correct>0.6)
+
+calf_prod_clean<-calf_prod_out %>%
+ filter(median_rt>=800)
+
+calf_6afc_clean<-calf_6afc_out %>%
+ filter(median_rt>=800 | proportion_correct>0.25)
+```
+
+## Save the cleaned data
+
+```{r}
+write.csv(arf_prod_clean,paste0(savepath,"cleaning_prolific/arf-production-rtFiltered-clean.csv"),row.names = FALSE)
+write.csv(arf_2afc_clean,paste0(savepath,"cleaning_prolific/arf-2afc-rtFiltered-clean.csv"),row.names = FALSE)
+write.csv(calf_prod_clean,paste0(savepath,"cleaning_prolific/calf-production-rtFiltered-clean.csv"),row.names = FALSE)
+write.csv(calf_6afc_clean,paste0(savepath,"cleaning_prolific/calf-6afc-rtFiltered-clean.csv"),row.names = FALSE)
+```
