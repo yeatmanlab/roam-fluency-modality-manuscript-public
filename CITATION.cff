@@ -1,0 +1,32 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite it as below."
+type: software
+title: "Analysis code for: Measuring Arithmetic Fluency in a Forced-Choice Format Does Not Alter the Construct"
+authors:
+  - family-names: "Mogan"
+    given-names: "Alexa D."
+    affiliation: "Department of Psychology & Human Development, Peabody College, Vanderbilt University"
+  - family-names: "Bhat"
+    given-names: "Kruttika G."
+    affiliation: "Graduate School of Education, Stanford University"
+  - family-names: "Townley-Flores"
+    given-names: "Carrie"
+    affiliation: "Graduate School of Education, Stanford University"
+  - name: "The ROAR Developer Consortium"
+    affiliation: "Graduate School of Education, Stanford University"
+  - family-names: "Yeatman"
+    given-names: "Jason D."
+    affiliation: "Graduate School of Education, Stanford University"
+  - family-names: "Wilkey"
+    given-names: "Eric D."
+    affiliation: "Department of Psychology & Human Development, Peabody College, Vanderbilt University"
+repository-code: "https://github.com/yeatmanlab/roam-response-format-manuscript-public"
+license: MIT
+version: "1.0"
+date-released: "2026-11-07"
+keywords:
+  - mathematics
+  - arithmetic fluency
+  - assessment
+  - math measurement
+  - digital assessment
